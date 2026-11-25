@@ -1,0 +1,359 @@
+diff -ruN src-antes/adapters/out/channels/smtp-email-channel.ts src-depois/adapters/out/channels/smtp-email-channel.ts
+--- src-antes/adapters/out/channels/smtp-email-channel.ts	1969-12-31 21:00:00.000000000 -0300
++++ src-depois/adapters/out/channels/smtp-email-channel.ts	2026-11-25 00:36:12.533378453 -0300
+@@ -0,0 +1,46 @@
++import nodemailer, { type Transporter } from 'nodemailer';
++import type { IdGenerator } from '../../../application/ports/clock.js';
++import type { MessageSender, OutgoingMessage, Receipt } from '../../../application/ports/message-sender.js';
++
++export interface SmtpEmailOptions {
++  host: string;
++  port: number;
++  secure: boolean;
++  user: string;
++  pass: string;
++  from: string;
++  ids: IdGenerator;
++  /** injetável para teste/preview */
++  transporter?: Transporter;
++}
++
++/**
++ * Provedor de e-mail REAL (Etapa 9), escolhido por configuração (`EMAIL_PROVIDER=smtp`).
++ * Mesma porta, mesmo contrato: o domínio e os casos de uso não sabem que o provedor mudou.
++ */
++export class SmtpEmailChannel implements MessageSender {
++  private readonly transporter: Transporter;
++  private readonly from: string;
++
++  constructor(private readonly options: SmtpEmailOptions) {
++    this.transporter =
++      options.transporter ??
++      nodemailer.createTransport({
++        host: options.host,
++        port: options.port,
++        secure: options.secure,
++        auth: { user: options.user, pass: options.pass },
++      });
++    this.from = options.from;
++  }
++
++  async send(message: OutgoingMessage): Promise<Receipt> {
++    const info = await this.transporter.sendMail({
++      from: this.from,
++      to: message.email ?? '',
++      subject: message.subject ?? '',
++      text: message.message,
++    });
++    return { providerId: info.messageId ?? `<${this.options.ids.newId()}@smtp>` };
++  }
++}
+diff -ruN src-antes/adapters/out/channels/whatsapp-channel.ts src-depois/adapters/out/channels/whatsapp-channel.ts
+--- src-antes/adapters/out/channels/whatsapp-channel.ts	1969-12-31 21:00:00.000000000 -0300
++++ src-depois/adapters/out/channels/whatsapp-channel.ts	2026-11-25 00:36:12.533378453 -0300
+@@ -0,0 +1,22 @@
++import type { IdGenerator } from '../../../application/ports/clock.js';
++import type { MessageSender, OutgoingMessage, Receipt } from '../../../application/ports/message-sender.js';
++import { realSleep } from '../system/system.js';
++
++export interface WhatsappChannelOptions {
++  ids: IdGenerator;
++  latencyMs?: number;
++  log?: (message: string) => void;
++  sleep?: (ms: number) => Promise<void>;
++}
++
++/** Adaptador do canal WhatsApp (simulado). Só entrega: as exigências do canal são do domínio. */
++export class WhatsappChannel implements MessageSender {
++  constructor(private readonly options: WhatsappChannelOptions) {}
++
++  async send(message: OutgoingMessage): Promise<Receipt> {
++    await (this.options.sleep ?? realSleep)(this.options.latencyMs ?? 120);
++    const providerId = `whatsapp-${this.options.ids.newId().slice(0, 8)}`;
++    (this.options.log ?? console.log)(`[WHATSAPP] para ${message.phone}: ${message.message}`);
++    return { providerId };
++  }
++}
+diff -ruN src-antes/domain/channels/whatsapp.ts src-depois/domain/channels/whatsapp.ts
+--- src-antes/domain/channels/whatsapp.ts	1969-12-31 21:00:00.000000000 -0300
++++ src-depois/domain/channels/whatsapp.ts	2026-11-25 00:36:12.531676771 -0300
+@@ -0,0 +1,13 @@
++import type { ChannelSpec } from '../channel.js';
++
++/**
++ * Canal WhatsApp (Etapa 9). Descrição nova, sem tocar em nada do domínio existente:
++ * exige telefone, não exige assunto, limite de mensagem de 4096 caracteres.
++ */
++export const whatsappChannel: ChannelSpec = {
++  name: 'whatsapp',
++  requiresPhone: true,
++  requiresEmail: false,
++  requiresSubject: false,
++  maxMessageLength: 4096,
++};
+diff -ruN src-antes/main/catalogue.ts src-depois/main/catalogue.ts
+--- src-antes/main/catalogue.ts	2026-11-25 00:36:12.529479344 -0300
++++ src-depois/main/catalogue.ts	2026-11-25 00:36:12.534174062 -0300
+@@ -2,6 +2,7 @@
+ import { fakeChannel } from '../domain/channels/fake.js';
+ import { smsChannel } from '../domain/channels/sms.js';
+ import { emailChannel } from '../domain/channels/email.js';
++import { whatsappChannel } from '../domain/channels/whatsapp.js';
+ 
+ /**
+  * Catálogo de canais do sistema, montado no composition root.
+@@ -10,7 +11,7 @@
+  * descrição em `src/domain/channels/` e o seu adaptador em `src/adapters/out/channels/`.
+  * Nenhum arquivo do domínio existente e nenhum caso de uso precisa mudar.
+  */
+-const SPECS = [fakeChannel, smsChannel, emailChannel] as const;
++const SPECS = [fakeChannel, smsChannel, emailChannel, whatsappChannel] as const;
+ 
+ export const channelCatalogue: ChannelCatalogue = {
+   find: (name: string) => SPECS.find((spec) => spec.name === name) ?? null,
+diff -ruN src-antes/main/cli.ts src-depois/main/cli.ts
+--- src-antes/main/cli.ts	1969-12-31 21:00:00.000000000 -0300
++++ src-depois/main/cli.ts	2026-11-25 00:36:12.534174062 -0300
+@@ -0,0 +1,113 @@
++/**
++ * Segundo adaptador primário (Etapa 9): um CLI que usa os MESMOS casos de uso do HTTP.
++ *
++ * Nada de regra aqui — é tradução de argumentos para entrada de caso de uso e da saída
++ * para texto, exatamente como o adaptador HTTP faz com requisição/resposta.
++ */
++import { loadConfig } from './config.js';
++import { buildContainer } from './container.js';
++
++function parseFlags(args: string[]): Record<string, string> {
++  const flags: Record<string, string> = {};
++  for (let i = 0; i < args.length; i++) {
++    const arg = args[i];
++    if (!arg.startsWith('--')) continue;
++    const key = arg.slice(2);
++    const next = args[i + 1];
++    if (next === undefined || next.startsWith('--')) {
++      flags[key] = 'true';
++    } else {
++      flags[key] = next;
++      i++;
++    }
++  }
++  return flags;
++}
++
++function print(value: unknown): void {
++  console.log(JSON.stringify(value, null, 2));
++}
++
++const HELP = `Uso:
++  npm run cli -- add-contact --name "<nome>" --email <email> [--phone <E.164>] [--optout sms,email]
++  npm run cli -- contacts
++  npm run cli -- contact --contact <id>
++  npm run cli -- send --contact <id> --channels sms,email --subject "<assunto>" --message "<texto>"
++  npm run cli -- retry --id <id>
++  npm run cli -- inbox --contact <id>`;
++
++async function main(argv: string[]): Promise<number> {
++  const [command, ...rest] = argv;
++  const flags = parseFlags(rest);
++  const config = loadConfig();
++  const container = buildContainer(config);
++
++  try {
++    switch (command) {
++      case 'add-contact': {
++        const created = await container.uses.createContact.execute({
++          name: flags.name,
++          email: flags.email,
++          phone: flags.phone,
++          optOut: flags.optout ? String(flags.optout).split(',') : undefined,
++        });
++        print({ id: created.id, name: created.name, email: created.email, phone: created.phone, optOut: created.optOut.map((c) => c.name) });
++        return 0;
++      }
++
++      case 'contacts':
++        print(await container.uses.listContacts.execute());
++        return 0;
++
++      case 'contact':
++        print(await container.uses.getContact.execute(Number(flags.contact)));
++        return 0;
++
++      case 'send': {
++        const notifications = await container.uses.sendNotifications.execute({
++          contactId: Number(flags.contact),
++          channels: String(flags.channels ?? '').split(',').filter((c) => c.length > 0),
++          message: String(flags.message ?? ''),
++          subject: flags.subject ?? null,
++        });
++        print(
++          notifications.map((n) => ({
++            id: n.id,
++            channel: n.channel.name,
++            status: n.status,
++            attempts: n.attempts,
++            lastError: n.lastError,
++          })),
++        );
++        return notifications.every((n) => n.status === 'SENT') ? 0 : 2;
++      }
++
++      case 'retry': {
++        const notification = await container.uses.retryNotification.execute(Number(flags.id));
++        print({
++          id: notification.id,
++          channel: notification.channel.name,
++          status: notification.status,
++          attempts: notification.attempts,
++          providerId: notification.providerId,
++        });
++        return 0;
++      }
++
++      case 'inbox':
++        print(await container.uses.listDeliveredMessages.execute(Number(flags.contact)));
++        return 0;
++
++      default:
++        console.error(HELP);
++        return 1;
++    }
++  } catch (error) {
++    console.error('erro:', error instanceof Error ? error.message : error);
++    return 1;
++  } finally {
++    await container.close();
++  }
++}
++
++main(process.argv.slice(2)).then((code) => process.exit(code));
+diff -ruN src-antes/main/config.ts src-depois/main/config.ts
+--- src-antes/main/config.ts	2026-11-25 00:36:12.529479344 -0300
++++ src-depois/main/config.ts	2026-11-25 00:36:12.534174062 -0300
+@@ -1,6 +1,15 @@
+ import 'dotenv/config';
+ 
+ export type Storage = 'prisma' | 'memory';
++export type EmailProvider = 'log' | 'smtp';
++
++export interface SmtpConfig {
++  readonly host: string;
++  readonly port: number;
++  readonly secure: boolean;
++  readonly user: string;
++  readonly pass: string;
++}
+ 
+ export interface AppConfig {
+   readonly port: number;
+@@ -8,6 +17,10 @@
+   readonly smsFailureRate: number;
+   readonly maxPerMinute: number;
+   readonly storage: Storage;
++  /** qual adaptador de e-mail usar: `log` (simulado) ou `smtp` (provedor real) */
++  readonly emailProvider: EmailProvider;
++  readonly smtp: SmtpConfig | null;
++  readonly mailFrom: string;
+ }
+ 
+ /**
+@@ -23,11 +36,32 @@
+     throw new Error('DATABASE_URL não definida');
+   }
+ 
++  const emailProvider: EmailProvider = (env.EMAIL_PROVIDER ?? 'log').toLowerCase() === 'smtp' ? 'smtp' : 'log';
++
+   return {
+     port: env.PORT ? Number(env.PORT) : 3007,
+     databaseUrl,
+     smsFailureRate: env.SMS_FAILURE_RATE ? Number(env.SMS_FAILURE_RATE) : 0.2,
+     maxPerMinute: env.MAX_NOTIFICATIONS_PER_MINUTE ? Number(env.MAX_NOTIFICATIONS_PER_MINUTE) : 5,
+     storage,
++    emailProvider,
++    smtp: emailProvider === 'smtp' ? readSmtp(env) : null,
++    mailFrom: env.MAIL_FROM ?? 'no-reply@notificacoes.local',
++  };
++}
++
++function readSmtp(env: NodeJS.ProcessEnv): SmtpConfig {
++  const host = env.SMTP_HOST;
++  const user = env.SMTP_USER;
++  const pass = env.SMTP_PASS;
++  if (!host || !user || !pass) {
++    throw new Error('EMAIL_PROVIDER=smtp exige SMTP_HOST, SMTP_USER e SMTP_PASS');
++  }
++  return {
++    host,
++    port: env.SMTP_PORT ? Number(env.SMTP_PORT) : 587,
++    secure: env.SMTP_SECURE === 'true',
++    user,
++    pass,
+   };
+ }
+diff -ruN src-antes/main/container.ts src-depois/main/container.ts
+--- src-antes/main/container.ts	2026-11-25 00:36:12.529479344 -0300
++++ src-depois/main/container.ts	2026-11-25 00:36:12.534174062 -0300
+@@ -4,6 +4,8 @@
+ import { InMemoryContactRepository } from '../adapters/out/memory/in-memory-contact-repository.js';
+ import { InMemoryNotificationRepository } from '../adapters/out/memory/in-memory-notification-repository.js';
+ import { LogEmailChannel } from '../adapters/out/channels/email-channel.js';
++import { SmtpEmailChannel } from '../adapters/out/channels/smtp-email-channel.js';
++import { WhatsappChannel } from '../adapters/out/channels/whatsapp-channel.js';
+ import { SmsChannel } from '../adapters/out/channels/sms-channel.js';
+ import { PrismaContactRepository } from '../adapters/out/prisma/prisma-contact-repository.js';
+ import { PrismaNotificationRepository } from '../adapters/out/prisma/prisma-notification-repository.js';
+@@ -24,7 +26,8 @@
+ import type { AppConfig } from './config.js';
+ 
+ export interface Container {
+-  readonly http: HttpDeps;
++  /** casos de uso prontos para qualquer adaptador primário (HTTP, CLI, ...) */
++  readonly uses: HttpDeps;
+   close(): Promise<void>;
+ }
+ 
+@@ -51,14 +54,20 @@
+   }
+ 
+   const fake = new FakeChannel(ids, clock);
++  const email =
++    config.emailProvider === 'smtp' && config.smtp
++      ? new SmtpEmailChannel({ ...config.smtp, from: config.mailFrom, ids })
++      : new LogEmailChannel({ ids });
++
+   const senders: SenderRegistry = {
+     fake,
+     sms: new SmsChannel({ failureRate: config.smsFailureRate, random, ids }),
+-    email: new LogEmailChannel({ ids }),
++    email,
++    whatsapp: new WhatsappChannel({ ids }),
+   };
+   const delivery = new DeliveryService(senders, clock);
+ 
+-  const http: HttpDeps = {
++  const uses: HttpDeps = {
+     createContact: new CreateContact(contacts, channelCatalogue),
+     listContacts: new ListContacts(contacts),
+     getContact: new GetContact(contacts),
+@@ -77,7 +86,7 @@
+   };
+ 
+   return {
+-    http,
++    uses,
+     close: async () => {
+       await prisma?.$disconnect();
+     },
+diff -ruN src-antes/main/server.ts src-depois/main/server.ts
+--- src-antes/main/server.ts	2026-11-25 00:36:12.529479344 -0300
++++ src-depois/main/server.ts	2026-11-25 00:36:12.534174062 -0300
+@@ -11,7 +11,7 @@
+ /** Sobe a API: compõe as dependências e liga o adaptador HTTP na porta configurada. */
+ export async function startServer(config: AppConfig): Promise<RunningApp> {
+   const container = buildContainer(config);
+-  const app = createApp(container.http);
++  const app = createApp(container.uses);
+ 
+   const server = await new Promise<Server>((resolve, reject) => {
+     const listening = app.listen(config.port, () => resolve(listening));

@@ -1,0 +1,36 @@
+{
+  "name": "aula07-notificacoes",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Aula 07 - serviço de notificações multicanal (fake, SMS, e-mail) escrito propositalmente em um único arquivo, como ponto de partida para refatoração para Ports and Adapters.",
+  "scripts": {
+    "postinstall": "prisma generate",
+    "dev": "tsx src/index.ts",
+    "dev:watch": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:studio": "prisma studio",
+    "test": "node --import tsx --test tests/e2e/*.test.ts tests/domain/*.test.ts tests/application/*.test.ts",
+    "typecheck": "tsc -p tsconfig.tests.json",
+    "cli": "node --import tsx src/main/cli.ts"
+  },
+  "dependencies": {
+    "@prisma/adapter-better-sqlite3": "^7.9.1",
+    "@prisma/client": "^7.9.1",
+    "@types/nodemailer": "^8.0.2",
+    "better-sqlite3": "^13.0.3",
+    "dotenv": "^17.4.2",
+    "express": "^5.1.0",
+    "nodemailer": "^10.6.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/express": "^5.0.3",
+    "@types/node": "^26.2.0",
+    "prisma": "^7.9.1",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  }
+}
